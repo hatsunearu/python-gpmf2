@@ -1,5 +1,7 @@
 # pygpmf
-A python Module to extract GPMF information from Videos
+A python Module to extract GPMF information from Videos.
+
+Originally forked from Alexis Mignon's `pygpmf` [repository](https://github.com/alexis-mignon/pygpmf).
 
 More information on the format is available on the
 [GoPro GitHub page](https://github.com/gopro/gpmf-parser).
@@ -7,7 +9,7 @@ More information on the format is available on the
 The primay aim of this project was to be able to extract GPS tracks
 from GoPro video files, so the GPS part is more tested.
 
-We use `python-ffmpeg` to extract the GPMF stream from video files.
+We use `ffmpeg-python` to extract the GPMF stream from video files.
 
 ```python
 import gpmf
