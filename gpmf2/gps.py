@@ -4,86 +4,43 @@ from xml.etree import ElementTree as ET
 
 import gpxpy
 from . import parse
+import numpy as np
+
+class UnsupportedBlock(ValueError):
+    pass
 
 
-GPSData = namedtuple("GPSData",
-                     [
-                         "description",
-                         "timestamp",
-                         "precision",
-                         "fix",
-                         "latitude",
-                         "longitude",
-                         "altitude",
-                         "speed_2d",
-                         "speed_3d",
-                         "units",
-                         "npoints"
-                     ])
+AcclBlock = namedtuple("AcclBlock", [
+    'us_timestamp',
+    'accel_xyz',
+    'temperature',
+    ])
 
 
-def extract_gps_blocks(stream):
-    """ Extract GPS data blocks from binary stream
+GPS9Block = namedtuple("GPS9Block", [
+    'us_timestamp',
+    'gps_times',
+    'lat',
+    'long',
+    'alt',
+    'speed_2d',
+    'speed_3d',
+    'dop',
+    'fix'
+    ])
 
-    This is a generator on lists `KVLItem` objects. In
-    the GPMF stream, GPS data comes into blocks of several
-    different data items. For each of these blocks we return a list.
+GPS5Block = namedtuple("GPS9Block", [
+    'us_timestamp',
+    'gps_timestamp',
+    'lat',
+    'long',
+    'alt',
+    'speed_2d',
+    'speed_3d',
+    'dop',
+    'fix'
+    ])
 
-    Parameters
-    ----------
-    stream: bytes
-        The raw GPMF binary stream
-
-    Returns
-    -------
-    gps_items_generator: generator
-        Generator of lists of `KVLItem` objects
-    """
-    for s in parse.filter_klv(stream, "STRM"):
-        content = []
-        is_gps = False
-        for elt in s.value:
-            content.append(elt)
-            if elt.key == "GPS5":
-                is_gps = True
-        if is_gps:
-            yield content
-
-
-def parse_gps_block(gps_block):
-    """Turn GPS data blocks into `GPSData` objects
-
-    Parameters
-    ----------
-    gps_block: list of KVLItem
-        A list of KVLItem corresponding to a GPS data block.
-
-    Returns
-    -------
-    gps_data: GPSData
-        A GPSData object holding the GPS information of a block.
-    """
-    block_dict = {
-        s.key: s for s in gps_block
-    }
-
-    gps_data = block_dict["GPS5"].value * 1.0 / block_dict["SCAL"].value
-
-    latitude, longitude, altitude, speed_2d, speed_3d = gps_data.T
-
-    return GPSData(
-        description=block_dict["STNM"].value,
-        timestamp=block_dict["GPSU"].value,
-        precision=block_dict["GPSP"].value / 100.,
-        fix=block_dict["GPSF"].value,
-        latitude=latitude,
-        longitude=longitude,
-        altitude=altitude,
-        speed_2d=speed_2d,
-        speed_3d=speed_3d,
-        units=block_dict["UNIT"].value,
-        npoints=len(gps_data)
-    )
 
 
 FIX_TYPE = {
@@ -92,68 +49,143 @@ FIX_TYPE = {
     3: "3d"
 }
 
+def parse_gps5_strm(strm_dict):
+    if not 'GPS5' in strm_dict:
+        raise UnsupportedBlock()
+    
+    gps_data = strm_dict['GPS5'].value.astype('float64') / strm_dict["SCAL"].value.astype('float64')
 
-def _make_speed_extensions(gps_data, i):
-    speed_2d = ET.Element("speed_2d")
-    value = ET.SubElement(speed_2d, "value")
-    value.text = "%g" % gps_data.speed_2d[i]
-    unit = ET.SubElement(speed_2d, "unit")
-    unit.text = "m/s"
+    latitude, longitude, altitude, speed_2d, speed_3d = gps_data.T
 
-    speed_3d = ET.Element("speed_3d")
-    value = ET.SubElement(speed_3d, "value")
-    value.text = "%g" % gps_data.speed_3d[i]
-    unit = ET.SubElement(speed_3d, "unit")
-    unit.text = "m/s"
+    return GPS5Block(
+        us_timestamp=strm_dict['STMP'].value,
+        gps_timestamp=strm_dict['GPSU'],
+        lat=latitude,
+        long=longitude,
+        alt=altitude,
+        speed_2d=speed_2d,
+        speed_3d=speed_3d,
+        dop=strm_dict['GPSP'].value.astype('float64') / 100,
+        fix=strm_dict['GPSF'].value
+    )
 
-    return [speed_2d, speed_3d]
 
 
-def make_pgx_segment(gps_blocks, first_only=False, speeds_as_extensions=True):
-    """Convert a list of GPSData objects into a GPX track segment.
+def process_gps9_strm(strm_dict):
+    if not 'GPS9' in strm_dict:
+        raise UnsupportedBlock()
+    
+    scale = strm_dict['SCAL'].value.astype('float64')
+    
 
-    Parameters
-    ----------
-    gps_blocks: list of GPSData
-        A list of GPSData objects
-    first_only: bool, optional (default=False)
-        If True use only the first GPS entry of each data block.
-    speeds_as_extensions: bool, optional (default=True)
-        If True, include 2d and 3d speed values as exentensions of
-        the GPX trackpoints. This is especially useful when saving
-        to GPX 1.1 format.
+    # 5th row is days since 2000, 6th row is seconds since midnight
+    gps_times = [ datetime.datetime(year=2000,month=1,day=1,tzinfo=datetime.timezone.utc) 
+        + datetime.timedelta(days=int(v[5]), seconds=v[6].astype('float64') / scale[6])
+        for v in strm_dict['GPS9'].value ]
+    
+    # rows 0-5 is lat, long, alt, speed2d, speed3d
+    data1 = strm_dict['GPS9'].value[:, 0:5].astype('float64') / scale[0:5]
 
-    Returns
-    -------
-    gpx_segment: gpxpy.gpx.GPXTrackSegment
-        A gpx track segment.
-    """
+    return GPS9Block(
+        us_timestamp=strm_dict['STMP'].value,
+        gps_times=gps_times,
+        lat=data1[:, 0],
+        long=data1[:, 1],
+        alt=data1[:, 2],
+        speed_2d=data1[:, 3],
+        speed_3d=data1[:, 4],
+        dop=strm_dict['GPS9'].value[:, 7].astype('float64') / scale[6],
+        fix=strm_dict['GPS9'].value[:, 8].astype('float64')
+    )
 
-    track_segment = gpxpy.gpx.GPXTrackSegment()
-    dt = timedelta(seconds=1.0 / 18.)
 
-    for gps_data in gps_blocks:
-        time = datetime.strptime(gps_data.timestamp, "%Y-%m-%d %H:%M:%S.%f")
-        # Reference says the frequency is about 18 Hz and other GPS data about 1Hz
-        stop = 1 if first_only else gps_data.npoints
-        for i in range(stop):
-            tp = gpxpy.gpx.GPXTrackPoint(
-                latitude=gps_data.latitude[i],
-                longitude=gps_data.longitude[i],
-                elevation=gps_data.altitude[i],
-                speed=gps_data.speed_3d[i],
-                position_dilution=gps_data.precision,
-                time=time + i * dt,
-                symbol="Square",
+
+def parse_accl_strm(strm_dict):
+
+    if not 'ACCL' in strm_dict:
+        raise UnsupportedBlock()
+
+    # order is YXZ
+    transform_matrix = np.array([
+        [0, 1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ]).astype('float64') / float(strm_dict['SCAL'].value)
+    
+    accel = strm_dict['ACCL'].value @ transform_matrix
+
+    return AcclBlock(
+        us_timestamp=strm_dict['STMP'].value,
+        accel_xyz=accel,
+        temperature=strm_dict['TMPC'].value,
+    )
+
+def get_frame_timecounter(cori_blocks, ignore_last_block=False):
+
+    frames_in_block = []
+    stmp_raw = []
+
+    # CORI block contains multiple CORI datapoint per frame
+    # each CORI block has one STMP
+    for block in cori_blocks:
+        stmp_block = [item.value for item in block if item.key == 'STMP']
+        if len(stmp_block) == 0:
+            raise ValueError(f'No STMP block detected in block {block}')
+        stmp = stmp_block[0]
+        stmp_raw.append(stmp)
+
+        [cori_block] = [item for item in block if item.key == 'CORI']
+
+        frames_in_block.append(cori_block.length.repeat)
+    
+    prev_stmp = stmp_raw[0]
+    frame_timecounter = []
+    for fib, stmp in zip(frames_in_block[0:-1], stmp_raw[1:]):
+        # make linspace to create frame timecounter interpolated timings for the prev block
+        # since the current STMP points to the first frame in the current block,
+        # the length of the linspace has to be fib + 1
+        # we only take the [0:-1] slice since we need to discard the last one 
+        # which would be in the current block
+        frame_timecounter.extend(np.linspace(prev_stmp, stmp, fib+1)[0:-1])
+        
+        prev_stmp = stmp
+
+    # last block is unaccounted for, interpolate 2nd last block's timing
+    # could be dangerous if you operate consecutive files at the same time
+    # since time can become non monotonic
+    if not ignore_last_block:
+        delta = stmp_raw[-1] - stmp_raw[-2]
+        numsamps = frames_in_block[-2] + 1 # second last block
+        dt = delta / numsamps
+
+        frame_timecounter.extend(
+            stmp_raw[-1] + np.arange(0, frames_in_block[-1]) * dt
             )
 
-            tp.type_of_gpx_fix = FIX_TYPE[gps_data.fix]
+    return frame_timecounter
 
-            if speeds_as_extensions:
 
-                for e in _make_speed_extensions(gps_data, 0):
-                    tp.extensions.append(e)
 
-            track_segment.points.append(tp)
+def convert_strm_dict(klv_strm):
+    if klv_strm.key != 'STRM':
+        raise ValueError('called convert_strm_dict on a non-STRM KLV')
+    
+    d = {}
+    for klv in klv_strm.value:
+        if not klv.key in d:
+            d[klv.key] = klv
+        else:
+            if isinstance(d[klv.key], list):
+                d[klv.key].append(klv)
+            else:
+                d[klv.key] = [d[klv.key], klv]
 
-    return track_segment
+    return d
+
+
+def traverse_gpmf(klv_iter):
+    for klv in klv_iter:
+        if klv.key == 'STRM':
+            yield convert_strm_dict(klv)
+        elif klv.length.type == '\x00':
+            yield from traverse_gpmf(klv.value)

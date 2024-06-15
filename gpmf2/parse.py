@@ -3,6 +3,7 @@ import types
 import struct
 import logging
 import numpy
+import datetime, pytz
 
 
 logger = logging.getLogger(__name__)
@@ -86,16 +87,34 @@ def parse_payload(x, fourcc, type_str, size, repeat):
                 a = a.reshape(repeat, dim1)
             return a
         elif type_str == "U":
-            x = x.decode()
-            year = "20" + x[:2]
-            month = x[2:4]
-            day = x[4:6]
-            hours = x[6:8]
-            mins = x[8:10]
-            seconds = x[10:]
-            return "%s-%s-%s %s:%s:%s" % (year, month, day, hours, mins, seconds)
+            x = x.decode() # '240503224125.700'
+            [x1, x2] = x.split('.')
+            dt = datetime.datetime.strptime(x1, "%y%m%d%H%M%S") # Y2K lol
+            dt += datetime.timedelta(milliseconds=int(x2))
+            dt = pytz.utc.localize(dt)
+            return dt
+        
+        # type '?' has a complex type, and needs to be decoded with reference to 4cc TYPE
+        # but implement using hardcoding because I'm lazy
+        elif type_str == '?':
+            if fourcc == 'GPS9':
+                # lllllllSS -- 32 bytes
+                l_dtype = numpy.dtype(">i")
+                S_dtype = numpy.dtype(">H")
+                a = []
+                for i in range(0,size*repeat,size):
+                    xslice = x[i:i+size]
+                    a1 = numpy.frombuffer(xslice[0:28], dtype=l_dtype)
+                    a2 = numpy.frombuffer(xslice[28:32], dtype=S_dtype).astype(numpy.int32)
+                    a.append(numpy.concatenate((a1, a2)))
+
+                return numpy.array(a)
+
+
+
         else:
             return x
+        
 
 
 def iter_klv(x):
@@ -112,6 +131,7 @@ def iter_klv(x):
         A generator of (fourcc, (type_str, size, repeat), payload) tuples.
     """
     start = 0
+    complextype = None
 
     while start < len(x):
         head = struct.unpack(">cccccBH", x[start: start + 8])
